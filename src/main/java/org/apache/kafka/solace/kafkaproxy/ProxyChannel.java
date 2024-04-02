@@ -237,7 +237,7 @@ public class ProxyChannel {
 						new ProduceResponseData().setThrottleTimeMs(0).setResponses(topicProduceResponseCollection));
 				Send send = produceResponse.toSend(requestHeader.toResponseHeader(), requestHeader.apiVersion());
 				try {
-					ProxyChannel.this.dataToSend(send, null /* no not log PRODUCE responses - too voluminous */);
+					ProxyChannel.this.dataToSend(send, ApiKeys.PRODUCE);
 					topicProduceResponseCollection = null;
 					requestHeader = null;
 					ackAccumulator = true; // set up for response
@@ -284,11 +284,14 @@ public class ProxyChannel {
 	// normally we will not end up with buffered data so we avoid
 	// adding the new send to the sendQueue, only doing so if necessary
 	private void dataToSend(Send send, ApiKeys apiKey) throws IOException {
-        // We do not log PRODUCE responses as too voluminous
-        if (apiKey != null) {
+        if (apiKey != ApiKeys.PRODUCE) {
             log.debug("Sending " + apiKey + " response (remote " + 
                       transportLayer.socketChannel().socket().getRemoteSocketAddress()
                       + ")");
+        } else {
+            log.trace("Sending " + apiKey + " response (remote " + 
+                      transportLayer.socketChannel().socket().getRemoteSocketAddress()
+                      + ")");            
         }
 		if (sendQueue.isEmpty()) {
 			send.writeTo(transportLayer);
@@ -348,9 +351,12 @@ public class ProxyChannel {
 		if (enableKafkaSaslAuthenticateHeaders || !proxySasl.authenticating()) {
 			header = RequestHeader.parse(buffer);
 			apiKey = header.apiKey();
-            // do not log PRODUCE requests - too voluminous
             if (apiKey != ApiKeys.PRODUCE) {
                 log.debug("Received " + apiKey + " request (remote " + 
+                          transportLayer.socketChannel().socket().getRemoteSocketAddress()
+                          + ")");
+            } else {
+                log.trace("Received " + apiKey + " request (remote " + 
                           transportLayer.socketChannel().socket().getRemoteSocketAddress()
                           + ")");
             }
