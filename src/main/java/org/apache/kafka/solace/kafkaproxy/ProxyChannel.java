@@ -44,6 +44,7 @@ import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.MutableRecordBatch;
 import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.requests.AbstractRequest;
+import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.InitProducerIdRequest;
@@ -54,6 +55,7 @@ import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestAndSize;
 import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.requests.SaslAuthenticateRequest;
 import org.apache.kafka.common.requests.SaslAuthenticateResponse;
 import org.apache.kafka.common.requests.SaslHandshakeResponse;
@@ -281,17 +283,23 @@ public class ProxyChannel {
 		System.out.print('\n');
 	}
 
+    private void responseToSend(AbstractResponse response, ApiKeys apiKey, ResponseHeader header, short version)
+            throws IOException {
+        log.trace("Response details {}", response);
+        Send send = response.toSend(header, version);
+        dataToSend(send, apiKey);
+    }
+
 	// normally we will not end up with buffered data so we avoid
 	// adding the new send to the sendQueue, only doing so if necessary
 	private void dataToSend(Send send, ApiKeys apiKey) throws IOException {
+        
         if (apiKey != ApiKeys.PRODUCE) {
-            log.debug("Sending " + apiKey + " response (remote " + 
-                      transportLayer.socketChannel().socket().getRemoteSocketAddress()
-                      + ")");
+            log.debug("Sending {} response to {}",
+                apiKey, transportLayer.socketChannel().socket().getRemoteSocketAddress());
         } else {
-            log.trace("Sending " + apiKey + " response (remote " + 
-                      transportLayer.socketChannel().socket().getRemoteSocketAddress()
-                      + ")");            
+            log.trace("Sending {} reponse to {}",
+                apiKey, transportLayer.socketChannel().socket().getRemoteSocketAddress());            
         }
 		if (sendQueue.isEmpty()) {
 			send.writeTo(transportLayer);
@@ -322,9 +330,8 @@ public class ProxyChannel {
 							new SaslAuthenticateResponseData().setErrorCode(Errors.SASL_AUTHENTICATION_FAILED.code())
 									.setAuthBytes(new byte[0]).setSessionLifetimeMs(0L));
 				}
-				Send send = saslAuthenticateResponse.toSend(requestHeader.toResponseHeader(),
-						requestHeader.apiVersion());
-				dataToSend(send, ApiKeys.SASL_AUTHENTICATE);
+                responseToSend(saslAuthenticateResponse, ApiKeys.SASL_AUTHENTICATE,
+                    requestHeader.toResponseHeader(), requestHeader.apiVersion());
 			} else {
 				if (worked) {
 					Send netOutBuffer = ByteBufferSend.sizePrefixed(ByteBuffer.wrap(new byte[0]));
@@ -351,15 +358,15 @@ public class ProxyChannel {
 		if (enableKafkaSaslAuthenticateHeaders || !proxySasl.authenticating()) {
 			header = RequestHeader.parse(buffer);
 			apiKey = header.apiKey();
+            short version = header.apiVersion();
             if (apiKey != ApiKeys.PRODUCE) {
-                log.debug("Received " + apiKey + " request (remote " + 
-                          transportLayer.socketChannel().socket().getRemoteSocketAddress()
-                          + ")");
+                log.debug("Received {} (v{}) request from {}",
+                    apiKey, version, transportLayer.socketChannel().socket().getRemoteSocketAddress());
             } else {
-                log.trace("Received " + apiKey + " request (remote " + 
-                          transportLayer.socketChannel().socket().getRemoteSocketAddress()
-                          + ")");
+                log.trace("Received {} (v{}) request from {}",
+                    apiKey, version, transportLayer.socketChannel().socket().getRemoteSocketAddress());
             }
+            
 			proxySasl.adjustState(apiKey);
 		} else {
             log.debug("Received SASL authentication request without Kafka header (remote " + 
@@ -419,6 +426,8 @@ public class ProxyChannel {
 		short version = requestHeader.apiVersion();
 		ApiKeys apiKey = requestAndSize.request.apiKey();
 
+        log.trace("Request Details: {}", requestAndSize.request);
+
 		switch (apiKey) {
             case API_VERSIONS: {
                 if (inFlightRequestCount > 0) return delayRequest(requestAndSize, requestHeader);
@@ -434,8 +443,7 @@ public class ProxyChannel {
                 ApiVersionsResponseData data = new ApiVersionsResponseData().setErrorCode(Errors.NONE.code())
                         .setThrottleTimeMs(0).setApiKeys(apiVersions);
                 ApiVersionsResponse apiVersionResponse = new ApiVersionsResponse(data);
-                Send send = apiVersionResponse.toSend(requestHeader.toResponseHeader(), version);
-                dataToSend(send, apiKey);
+                responseToSend(apiVersionResponse, apiKey, requestHeader.toResponseHeader(), version);
                 break;
             }
             case SASL_HANDSHAKE: {
@@ -447,8 +455,7 @@ public class ProxyChannel {
                 }
                 SaslHandshakeResponse saslHandshakeResponse = new SaslHandshakeResponse(
                         new SaslHandshakeResponseData().setErrorCode(Errors.NONE.code()).setMechanisms(saslMechanisms));
-                Send send = saslHandshakeResponse.toSend(requestHeader.toResponseHeader(), version);
-                dataToSend(send, apiKey);
+                responseToSend(saslHandshakeResponse, apiKey, requestHeader.toResponseHeader(), version);
                 break;
             }
             case SASL_AUTHENTICATE: {
@@ -475,8 +482,7 @@ public class ProxyChannel {
                 		.setProducerId(requestData.producerId())
                 		.setProducerEpoch(requestData.producerEpoch());
                 InitProducerIdResponse response= new InitProducerIdResponse(responseData);
-                Send send = response.toSend(requestHeader.toResponseHeader(), version);
-                dataToSend(send, apiKey);
+                responseToSend(response, apiKey, requestHeader.toResponseHeader(), version);
             	break;
             }
             case METADATA: {
@@ -500,8 +506,7 @@ public class ProxyChannel {
                         new MetadataResponseData().setThrottleTimeMs(0).setBrokers(listenPort.brokers())
                                 .setClusterId(listenPort.clusterId()).setControllerId(0).setTopics(topics),
                         version);
-                Send send = metadataResponse.toSend(requestHeader.toResponseHeader(), version);
-                dataToSend(send, apiKey);
+                responseToSend(metadataResponse, apiKey, requestHeader.toResponseHeader(), version);
                 break;
             }
             case PRODUCE: {
