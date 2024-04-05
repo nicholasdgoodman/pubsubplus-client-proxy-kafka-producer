@@ -298,7 +298,7 @@ public class ProxyChannel {
             log.debug("Sending {} response to {}",
                 apiKey, transportLayer.socketChannel().socket().getRemoteSocketAddress());
         } else {
-            log.trace("Sending {} reponse to {}",
+            log.trace("Sending {} response to {}",
                 apiKey, transportLayer.socketChannel().socket().getRemoteSocketAddress());            
         }
 		if (sendQueue.isEmpty()) {
@@ -426,7 +426,7 @@ public class ProxyChannel {
 		short version = requestHeader.apiVersion();
 		ApiKeys apiKey = requestAndSize.request.apiKey();
 
-        log.trace("Request Details: {}", requestAndSize.request);
+        log.trace("Request details: {}", requestAndSize.request);
 
 		switch (apiKey) {
             case API_VERSIONS: {

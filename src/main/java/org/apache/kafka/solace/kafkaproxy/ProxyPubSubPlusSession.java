@@ -22,6 +22,9 @@ import com.solacesystems.jcsmp.DeliveryMode;
 
 
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.HashSet;
 import java.util.Properties;
 import java.util.Base64;
@@ -37,7 +40,10 @@ class ProxyPubSubPlusSession {
     private final JCSMPSession session;
     private final XMLMessageProducer publisher;
     private final String topicSeparatorReplace;
-   
+
+    private long publishCount = 0;
+    ScheduledExecutorService publishCountLogger;
+
     public ProxyPubSubPlusSession(Properties baseServiceProps,
             ProxyChannel channel,
             byte[] username, byte[] password)
@@ -119,6 +125,18 @@ class ProxyPubSubPlusSession {
                 }
             }
         });
+        publishCountLogger = Executors.newScheduledThreadPool(1);
+        publishCountLogger.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                Thread.currentThread().setName("Publish_Rate_Logger");
+                if(publishCount > 0) {
+                    log.debug("Published Message Rate: {} msg/s", publishCount);
+                }
+                publishCount = 0;
+            }
+
+        }, 1000, 1000, TimeUnit.MILLISECONDS); 
     }
     
     private String solaceConvertTopic(String topic) {
@@ -146,6 +164,7 @@ class ProxyPubSubPlusSession {
 			}
 			final Topic solaceTopic = JCSMPFactory.onlyInstance().createTopic(solaceConvertTopic(topic));
 			publisher.send(msg, solaceTopic);
+            publishCount++;
 		} catch (JCSMPException e) {
 			log.info("Publish did not work: " + e);
 		    new ProxyChannel.ProduceAckState(produceAckState, false).addToWorkQueue();
@@ -155,6 +174,7 @@ class ProxyPubSubPlusSession {
     public void close() {
         session.closeSession();
         publisher.close();
+        publishCountLogger.shutdown();
     }
         
 }
