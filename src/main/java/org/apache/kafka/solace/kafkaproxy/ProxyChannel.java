@@ -237,14 +237,15 @@ public class ProxyChannel {
 			if (produceAckState.getLastInRequest()) {
 				ProduceResponse produceResponse = new ProduceResponse(
 						new ProduceResponseData().setThrottleTimeMs(0).setResponses(topicProduceResponseCollection));
-				Send send = produceResponse.toSend(requestHeader.toResponseHeader(), requestHeader.apiVersion());
-				try {
-					ProxyChannel.this.dataToSend(send, ApiKeys.PRODUCE);
+
+                try {
+                    responseToSend(produceResponse, ApiKeys.PRODUCE, 
+                        requestHeader.toResponseHeader(), requestHeader.apiVersion());
 					topicProduceResponseCollection = null;
 					requestHeader = null;
 					ackAccumulator = true; // set up for response
 				} catch (IOException e) {
-					ProxyChannel.this.close("Could not send PRODUCE response: " + e);
+					close("Could not send PRODUCE response: " + e);
 				}
 			}
 		}

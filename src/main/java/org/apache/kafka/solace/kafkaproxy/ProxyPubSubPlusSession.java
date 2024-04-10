@@ -27,7 +27,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.HashSet;
 import java.util.Properties;
-import java.util.Base64;
 import java.io.UnsupportedEncodingException;
 
 import org.slf4j.Logger;
@@ -158,14 +157,13 @@ class ProxyPubSubPlusSession {
 			msg.writeAttachment(payload);
 			if (key != null) {
 			    SDTMap solaceMsgProperties = JCSMPFactory.onlyInstance().createMap();
-			    // solaceMsgProperties.putString("kafka_key", Base64.getEncoder().encodeToString(key));  // old
-			    solaceMsgProperties.putString(MessageUserPropertyConstants.QUEUE_PARTITION_KEY, Base64.getEncoder().encodeToString(key));  // old
+			    solaceMsgProperties.putString(MessageUserPropertyConstants.QUEUE_PARTITION_KEY, new String(key, "UTF-8"));
 			    msg.setProperties(solaceMsgProperties);
 			}
 			final Topic solaceTopic = JCSMPFactory.onlyInstance().createTopic(solaceConvertTopic(topic));
 			publisher.send(msg, solaceTopic);
             publishCount++;
-		} catch (JCSMPException e) {
+		} catch (UnsupportedEncodingException | JCSMPException e) {
 			log.info("Publish did not work: " + e);
 		    new ProxyChannel.ProduceAckState(produceAckState, false).addToWorkQueue();
 		}

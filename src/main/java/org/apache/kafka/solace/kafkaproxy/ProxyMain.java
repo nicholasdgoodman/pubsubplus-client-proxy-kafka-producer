@@ -8,30 +8,25 @@ package org.apache.kafka.solace.kafkaproxy;
  */
 
 import java.util.Properties;
-import java.util.Base64;
 import java.util.UUID;
-import java.nio.ByteBuffer;
 import java.io.InputStream;
 import java.io.FileInputStream;
 import java.io.IOException;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
+import org.slf4j.impl.SimpleLogger;
 
 public class ProxyMain {
     
-    private static final Logger log = LoggerFactory.getLogger(ProxyMain.class);
+    private static final Logger log = initializeLogger();
     private final String clusterId;
     
     public ProxyMain() {
         UUID uuid = UUID.randomUUID();
-        byte[] src = ByteBuffer.wrap(new byte[16])
-                .putLong(uuid.getMostSignificantBits())
-                .putLong(uuid.getLeastSignificantBits())
-                .array();
-        this.clusterId = Base64.getUrlEncoder().encodeToString(src).substring(0, 22);
+        this.clusterId = uuid.toString();
         log.debug("Cluster id: " + this.clusterId);
+        log.trace("Trace logging enabled.");
     }
     
      private void startup(String args[]) {
@@ -66,7 +61,12 @@ public class ProxyMain {
      public static void main(String[] args) {
         ProxyMain m = new ProxyMain();
         m.startup(args);
+    }
 
+    public static Logger initializeLogger() {
+        System.setProperty(SimpleLogger.SHOW_DATE_TIME_KEY, "true");
+        System.setProperty(SimpleLogger.DATE_TIME_FORMAT_KEY, "yyyy-MM-dd' 'HH:mm:ss.SSS");
+        return LoggerFactory.getLogger(ProxyMain.class);
     }
     
 }
