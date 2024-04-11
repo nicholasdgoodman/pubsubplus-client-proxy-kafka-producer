@@ -546,15 +546,17 @@ public class ProxyChannel {
                             throw new InvalidRequestException("Invalid partition index in PRODUCE for topic: " + topicName
                                     + ", index: " + partitionData.index());
                         }
+                        int batchCount = 0;
                         int recordCount = 0;
                         MemoryRecords records = (MemoryRecords) partitionData.records();
                         AbstractIterator<MutableRecordBatch> batchIt = records.batchIterator();
                         while (batchIt.hasNext()) {
-                            recordCount++;
+                            batchCount++;
                             MutableRecordBatch batch = batchIt.next();
                             BufferSupplier.GrowableBufferSupplier supplier = new BufferSupplier.GrowableBufferSupplier();
                             CloseableIterator<Record> recordIt = batch.streamingIterator(supplier);
                             while (recordIt.hasNext()) {
+                                recordCount++;
                                 Record record = recordIt.next();
                                 final byte[] payload;
                                 if (record.hasValue()) {
@@ -580,9 +582,10 @@ public class ProxyChannel {
                             }
                         }
                         // We do not want to deal with no records for a topic
-                        if (recordCount == 0) {
+                        if (batchCount == 0) {
                             throw new InvalidRequestException("No records in PRODUCE request, topic: " + topicName);
                         }
+                        log.trace("Published PRODUCE request: {} records in {} batches.", recordCount, batchCount);
                     }
                 }
                 break;
