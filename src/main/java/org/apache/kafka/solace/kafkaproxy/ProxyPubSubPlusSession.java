@@ -86,6 +86,7 @@ class ProxyPubSubPlusSession {
 	    });
         
         publishService = Executors.newSingleThreadExecutor();
+        publishService.submit(() -> Thread.currentThread().setName("Publish_Service"));
     }
 
     public void addChannel(ProxyChannel channel) {
@@ -168,6 +169,9 @@ class ProxyPubSubPlusSession {
 
     public void publish(String topic, int partitionId, byte[] payload, byte[] key, ProxyChannel.ProduceAckState produceAckState) {
         publishService.submit(() -> {
+            if(publishService.isShutdown()) {
+                return;
+            }
             try {
                 BytesMessage msg = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
                 msg.setDeliveryMode(DeliveryMode.PERSISTENT);
@@ -190,6 +194,7 @@ class ProxyPubSubPlusSession {
     }
     
     public void close() {
+        publishService.shutdown();
         session.closeSession();
         publisher.close();
         publishCountLogger.shutdown();
