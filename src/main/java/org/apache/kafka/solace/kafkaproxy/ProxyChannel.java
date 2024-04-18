@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
@@ -27,6 +28,8 @@ import org.apache.kafka.common.message.ApiVersionsRequestData;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersion;
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersionCollection;
+import org.apache.kafka.common.message.ProduceRequestData.TopicProduceDataCollection;
+import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceResponse;
 import org.apache.kafka.common.message.InitProducerIdRequestData;
 import org.apache.kafka.common.message.InitProducerIdResponseData;
 import org.apache.kafka.common.message.MetadataRequestData;
@@ -59,7 +62,6 @@ import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.requests.SaslAuthenticateRequest;
 import org.apache.kafka.common.requests.SaslAuthenticateResponse;
 import org.apache.kafka.common.requests.SaslHandshakeResponse;
-import org.apache.kafka.common.utils.AbstractIterator;
 import org.apache.kafka.common.utils.BufferSupplier;
 import org.apache.kafka.common.utils.CloseableIterator;
 
@@ -70,6 +72,8 @@ public class ProxyChannel {
 	private static final Logger log = LoggerFactory.getLogger(ProxyChannel.class);
 	private final Queue<Send> sendQueue;
 	private final TransportLayer transportLayer;
+	private final ProxyReactor.ListenPort listenPort;
+    private final int partitionsPerTopic;
 	private ProxyPubSubPlusSession session;
 	private final ByteBuffer size; // holds the size field (first 4 bytes) of a received message
 	private ByteBuffer buffer; // byte buffer used to hold all of message except for first 4 bytes
@@ -78,77 +82,68 @@ public class ProxyChannel {
 	private static final List<String> saslMechanisms = List.of("PLAIN");
 	private ProxySasl proxySasl = new ProxySasl();
 	private boolean enableKafkaSaslAuthenticateHeaders;
-	private ProxyReactor.ListenPort listenPort;
 	private ProduceResponseProcessing produceResponseProcesssing;
     private int inFlightRequestCount = 0;   // count of requests being processed asynchronously (e.g. authentication or produce requests)
     private RequestAndSize savedRequestAndSize = null;   // saved information for request that could not be processed immediately
     private RequestHeader savedRequestHeader = null;     // saved information for request that could not be processed immediately
 
 	final static class ProduceAckState extends ProxyReactor.WorkEntry {
-		private final String topic;
-		private final ProduceResponseData.TopicProduceResponseCollection topicProduceResponseCollection;
+        private final ProduceResponse produceResponse;
 		private final RequestHeader requestHeader;
-		private final boolean lastInTopic;
 		private final boolean lastInRequest;
-		private final boolean worked;
+		private final boolean success;
+        private final PartitionProduceResponse partitionProduceResponse;
 
-		public ProduceAckState(ProxyChannel proxyChannel, String topic,
-				ProduceResponseData.TopicProduceResponseCollection topicProduceResponseCollection,
-				RequestHeader requestHeader, boolean lastInTopic, boolean lastInRequest) {
+        public ProduceAckState(ProxyChannel proxyChannel,
+                ProduceResponse produceResponse,
+                ProduceResponseData.PartitionProduceResponse partitionProduceResponse,
+				RequestHeader requestHeader, boolean lastInRequest) {
 			super(proxyChannel);
-			this.topic = topic;
-			this.topicProduceResponseCollection = topicProduceResponseCollection;
+            this.produceResponse = produceResponse;
+            this.partitionProduceResponse = partitionProduceResponse;
 			this.requestHeader = requestHeader;
-			this.lastInTopic = lastInTopic;
 			this.lastInRequest = lastInRequest;
-			this.worked = true;
+			this.success = true;
 		}
 
 		// creates new ProduceAckState from existing one but sets new value for 'worked'
 		// Everything is final and it is very unusual for 'worked' to not be true, so in
 		// failure cases we construct a new entry from an existing entry
-		public ProduceAckState(ProduceAckState srcState, boolean worked) {
+		public ProduceAckState(ProduceAckState srcState, boolean success) {
 			super(srcState.getProxyChannel());
-			this.topic = srcState.getTopic();
-			this.topicProduceResponseCollection = srcState.getTopicProduceResponseCollection();
+            this.produceResponse = srcState.getProduceResponse();
+            this.partitionProduceResponse = srcState.getPartitionProduceResponse();
 			this.requestHeader = srcState.getRequestHeader();
-			this.lastInTopic = srcState.getLastInTopic();
-			this.lastInRequest = srcState.getLastInRequest();
-			this.worked = worked;
+			this.lastInRequest = srcState.isLastInRequest();
+			this.success = success;
 		}
 
-		public String getTopic() {
-			return topic;
-		}
+        public ProduceResponse getProduceResponse() {
+            return produceResponse;
+        }
 
-		public ProduceResponseData.TopicProduceResponseCollection getTopicProduceResponseCollection() {
-			return topicProduceResponseCollection;
-		}
+        public PartitionProduceResponse getPartitionProduceResponse() {
+            return partitionProduceResponse;
+        }
 
 		public RequestHeader getRequestHeader() {
 			return requestHeader;
 		}
 
-		public boolean getLastInTopic() {
-			return lastInTopic;
-		}
-
-		public boolean getLastInRequest() {
+		public boolean isLastInRequest() {
 			return lastInRequest;
 		}
 
-		public boolean getWorked() {
-			return worked;
+		public boolean isSuccess() {
+			return success;
 		}
 
 		@Override
 		public String toString() {
-			final String colString = (topicProduceResponseCollection == null) ? "null"
-					: topicProduceResponseCollection.toString();
 			final String hdrString = (requestHeader == null) ? "null" : requestHeader.toString();
-			return "ProduceAckState{" + "topic=" + topic + ", topicProduceResponseCollection=" + colString
-					+ ", requestHeader=" + hdrString + ", lastInTopic=" + lastInTopic + ", lastInRequest="
-					+ lastInRequest + ", worked=" + worked + "}";
+			return "ProduceAckState{" + "produceResponse=" + produceResponse + ", partitionProduceResponse=" + partitionProduceResponse
+					+ ", requestHeader=" + hdrString + ", lastInRequest="
+					+ lastInRequest + ", worked=" + success + "}";
 		}
 	}
 
@@ -206,44 +201,23 @@ public class ProxyChannel {
 	}
 
 	private class ProduceResponseProcessing {
-		private boolean ackAccumulator;
-		private RequestHeader requestHeader;
-		private ProduceResponseData.TopicProduceResponseCollection topicProduceResponseCollection;
-
 		ProduceResponseProcessing() {
-			ackAccumulator = true; // indicates publish worked
+
 		}
 
 		void handleProduceAckState(ProduceAckState produceAckState) {
-			if (!produceAckState.getWorked())
-				ackAccumulator = false; // set to false for any failure seen
-			if (produceAckState.getTopicProduceResponseCollection() != null) {
-				topicProduceResponseCollection = produceAckState.getTopicProduceResponseCollection();
-			}
-			if (produceAckState.getRequestHeader() != null) {
-				requestHeader = produceAckState.getRequestHeader();
-			}
-			/// TBD properly set error code if there was an ack error
-			if (produceAckState.getLastInTopic()) {
-				topicProduceResponseCollection.add(new ProduceResponseData.TopicProduceResponse()
-						.setName(produceAckState.getTopic()).setPartitionResponses(
-								Collections.singletonList(new ProduceResponseData.PartitionProduceResponse().setIndex(0)
-										// No error code that really maps well for error case
-										.setErrorCode(
-												ackAccumulator ? Errors.NONE.code() : Errors.KAFKA_STORAGE_ERROR.code())
-										.setBaseOffset(-1).setLogAppendTimeMs(-1).setLogStartOffset(0))));
-				ackAccumulator = true; // reset ack state for next topic
-			}
-			if (produceAckState.getLastInRequest()) {
-				ProduceResponse produceResponse = new ProduceResponse(
-						new ProduceResponseData().setThrottleTimeMs(0).setResponses(topicProduceResponseCollection));
+            RequestHeader requestHeader = produceAckState.getRequestHeader();
+            
+            if (!produceAckState.isSuccess()) {
+                produceAckState.getPartitionProduceResponse()
+                    .setErrorCode(Errors.KAFKA_STORAGE_ERROR.code());
+            }
 
+			if (produceAckState.isLastInRequest()) {
+                ProduceResponse produceResponse = produceAckState.getProduceResponse();
                 try {
                     responseToSend(produceResponse, ApiKeys.PRODUCE, 
                         requestHeader.toResponseHeader(), requestHeader.apiVersion());
-					topicProduceResponseCollection = null;
-					requestHeader = null;
-					ackAccumulator = true; // set up for response
 				} catch (IOException e) {
 					close("Could not send PRODUCE response: " + e);
 				}
@@ -251,10 +225,11 @@ public class ProxyChannel {
 		}
 	}
 
-	ProxyChannel(SocketChannel socketChannel, TransportLayer transportLayer, ProxyReactor.ListenPort listenPort)
+	ProxyChannel(SocketChannel socketChannel, TransportLayer transportLayer, ProxyReactor.ListenPort listenPort, int partitionsPerTopic)
 			throws IOException {
 		this.transportLayer = transportLayer;
 		this.listenPort = listenPort;
+        this.partitionsPerTopic = partitionsPerTopic;
 		size = ByteBuffer.allocate(4);
 		enableKafkaSaslAuthenticateHeaders = false;
 		produceResponseProcesssing = new ProxyChannel.ProduceResponseProcessing();
@@ -272,16 +247,6 @@ public class ProxyChannel {
 
 	ProxyReactor.ListenPort getListenPort() {
 		return listenPort;
-	}
-
-	private static void byteBufferToHex(ByteBuffer buf) {
-		final byte[] bytes = new byte[buf.remaining()];
-		buf.duplicate().get(bytes);
-		for (byte b : bytes) {
-			String st = String.format("%02X ", b);
-			System.out.print(st);
-		}
-		System.out.print('\n');
 	}
 
     private void responseToSend(AbstractResponse response, ApiKeys apiKey, ResponseHeader header, short version)
@@ -490,12 +455,15 @@ public class ProxyChannel {
                 if (inFlightRequestCount > 0) return delayRequest(requestAndSize, requestHeader);
                 MetadataRequest metadataRequest = (MetadataRequest) requestAndSize.request;
                 MetadataRequestData data = metadataRequest.data();
-                MetadataResponseData.MetadataResponsePartition partitionMetadata = new MetadataResponseData.MetadataResponsePartition()
-                        .setPartitionIndex(0).setErrorCode(Errors.NONE.code()).setLeaderEpoch(1).setLeaderId(0)
+
+                List<MetadataResponseData.MetadataResponsePartition> partitionList = new ArrayList<>();
+                for(int n = 0; n < partitionsPerTopic; n++) {
+                    partitionList.add(new MetadataResponseData.MetadataResponsePartition()
+                        .setPartitionIndex(n).setErrorCode(Errors.NONE.code()).setLeaderEpoch(1).setLeaderId(0)
                         .setReplicaNodes(Arrays.asList(0)).setIsrNodes(Arrays.asList(0))
-                        .setOfflineReplicas(Collections.emptyList());
-                List<MetadataResponseData.MetadataResponsePartition> partitionList = Collections
-                        .singletonList(partitionMetadata);
+                        .setOfflineReplicas(Collections.emptyList()));
+                }
+                
                 MetadataResponseData.MetadataResponseTopicCollection topics = new MetadataResponseData.MetadataResponseTopicCollection();
                 for (MetadataRequestData.MetadataRequestTopic topic : data.topics()) {
                     MetadataResponseData.MetadataResponseTopic topicMetadata = new MetadataResponseData.MetadataResponseTopic()
@@ -512,52 +480,62 @@ public class ProxyChannel {
             }
             case PRODUCE: {
                 ProduceRequest produceRequest = (ProduceRequest) requestAndSize.request;
-                // First we need to determine the number of topic records
-                int topicCount = 0;
-                {
-                    Iterator<ProduceRequestData.TopicProduceData> it = produceRequest.data().topicData().iterator();
-                    while (it.hasNext()) {
-                        it.next();
-                        topicCount++;
-                    }
-                }
+                ProduceRequestData produceRequestData = produceRequest.data();
+                TopicProduceDataCollection produceTopicData = produceRequestData.topicData();
+
                 // We should not get no topics, and do not want to deal with it
-                if (topicCount == 0) {
+                if (produceTopicData.isEmpty()) {
                     throw new InvalidRequestException("No topics in PRODUCE request");
                 }
-                Iterator<ProduceRequestData.TopicProduceData> it = produceRequest.data().topicData().iterator();
-                String topicName = "";
-                ProduceResponseData.TopicProduceResponseCollection topicResponseCollection = new ProduceResponseData.TopicProduceResponseCollection(
-                        2);
-                while (it.hasNext()) {
-                    ProduceRequestData.TopicProduceData topicProduceData = it.next();
-                    topicName = topicProduceData.name();
-                    int partitionCount = 0;
-                    for (ProduceRequestData.PartitionProduceData partitionData : topicProduceData.partitionData()) {
-                        // We only advertise one partition per topic, so should only have one
-                        // partition per topic that is published to, and it should always be
-                        // partition 0
-                        partitionCount++;
-                        if (partitionCount > 1) {
-                            throw new InvalidRequestException(
-                                    "More than one partition per topic in PRODUCE request, topic: " + topicName);
-                        }
-                        if (partitionData.index() != 0) {
-                            throw new InvalidRequestException("Invalid partition index in PRODUCE for topic: " + topicName
-                                    + ", index: " + partitionData.index());
-                        }
+                
+                ProduceResponseData.TopicProduceResponseCollection topicResponseCollection =
+                    new ProduceResponseData.TopicProduceResponseCollection(produceTopicData.size());
+
+                ProduceResponseData produceResponseData = new ProduceResponseData()
+                    .setThrottleTimeMs(0)
+                    .setResponses(topicResponseCollection);
+                
+                ProduceResponse produceResponse = new ProduceResponse(produceResponseData);
+                    
+                Iterator<ProduceRequestData.TopicProduceData> topicProduceDataIt = produceTopicData.iterator();
+                while (topicProduceDataIt.hasNext()) {
+                    ProduceRequestData.TopicProduceData topicProduceData = topicProduceDataIt.next();
+
+                    String topicName = topicProduceData.name();
+                    List<PartitionProduceResponse> partitionProduceResponses = new ArrayList<>();
+                    ProduceResponseData.TopicProduceResponse topicProduceResponse = (new ProduceResponseData.TopicProduceResponse())
+                        .setName(topicName)
+                        .setPartitionResponses(partitionProduceResponses);
+                    topicResponseCollection.add(topicProduceResponse);
+
+                    Iterator<ProduceRequestData.PartitionProduceData> partitionDataIt = topicProduceData.partitionData().iterator();
+                    while (partitionDataIt.hasNext()) {
+                        ProduceRequestData.PartitionProduceData partitionData = partitionDataIt.next();
+                        
+                        int partitionId = partitionData.index();
+                        ProduceResponseData.PartitionProduceResponse partitionResponse = (new ProduceResponseData.PartitionProduceResponse())
+                            .setIndex(partitionId)
+                            .setBaseOffset(-1)
+                            .setLogAppendTimeMs(-1)
+                            .setLogStartOffset(-1);
+                        partitionProduceResponses.add(partitionResponse);
+
                         int batchCount = 0;
                         int recordCount = 0;
                         MemoryRecords records = (MemoryRecords) partitionData.records();
-                        AbstractIterator<MutableRecordBatch> batchIt = records.batchIterator();
+                        
+                        Iterator<MutableRecordBatch> batchIt = records.batchIterator();
                         while (batchIt.hasNext()) {
-                            batchCount++;
                             MutableRecordBatch batch = batchIt.next();
+
+                            batchCount++;
                             BufferSupplier.GrowableBufferSupplier supplier = new BufferSupplier.GrowableBufferSupplier();
+                            
                             CloseableIterator<Record> recordIt = batch.streamingIterator(supplier);
                             while (recordIt.hasNext()) {
-                                recordCount++;
                                 Record record = recordIt.next();
+
+                                recordCount++;
                                 final byte[] payload;
                                 if (record.hasValue()) {
                                     payload = new byte[record.value().remaining()];
@@ -572,13 +550,15 @@ public class ProxyChannel {
                                 } else {
                                     key = null;
                                 }
-                                final ProduceAckState produceAckState = new ProduceAckState(this, topicName,
-                                        topicResponseCollection, requestHeader, !recordIt.hasNext() /* lastInTopic */,
-                                        !recordIt.hasNext() && !it.hasNext());
+                                boolean lastInRequest = !(recordIt.hasNext() || batchIt.hasNext() || partitionDataIt.hasNext() || topicProduceDataIt.hasNext());
+                                
+                                final ProduceAckState produceAckState = new ProduceAckState(this, 
+                                    produceResponse, partitionResponse,
+                                    requestHeader, lastInRequest);
+                                
                                 inFlightRequestCount++;
-                                topicResponseCollection = null;
-                                requestHeader = null;
-                                session.publish(topicName, payload, key, produceAckState);
+                                
+                                session.publish(topicName, partitionId, payload, key, produceAckState);
                             }
                         }
                         // We do not want to deal with no records for a topic

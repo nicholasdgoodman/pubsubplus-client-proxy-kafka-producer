@@ -211,15 +211,16 @@ public class ProxyReactor extends Thread {
     private Selector selector;
     private boolean reactorRunning;
     private String clusterId;
+    private final int partitionsPerTopic;
     private final BlockingQueue<WorkEntry> workQueue;
-    private ListenPort listenPorts[];
-    
+    private ListenPort listenPorts[];  
     
     public ProxyReactor(ProxyConfig config, String clusterId) throws Exception {
         this.setName("Kafka_Proxy_Reactor");
         this.clusterId = clusterId;
         selector = SelectorProvider.provider().openSelector();
         workQueue = new LinkedBlockingQueue<WorkEntry>();
+        partitionsPerTopic = config.getInt(ProxyConfig.PARTITIONS_PER_TOPIC_CONFIG);
         final List<ProxyReactor.ListenEntry> listenerConfig = ProxyConfig.parseAndValidateListenAddresses(config.getList(ProxyConfig.LISTENERS_CONFIG));
         final List<InetSocketAddress> advertisedListenerConfig = ProxyConfig.parseAndValidateAdvertisedListenAddresses(config.getList(ProxyConfig.ADVERTISED_LISTENERS_CONFIG));
         final int numListenPorts = listenerConfig.size();
@@ -267,7 +268,8 @@ public class ProxyReactor extends Thread {
 	        SelectionKey channelKey = socketChannel.register(selector, SelectionKey.OP_READ);
 	        channelKey.attach(new ProxyChannel(socketChannel, 
 	                                           listenPort.createTransportLayer(socketChannel, channelKey),
-	                                           listenPort));
+	                                           listenPort,
+                                               partitionsPerTopic));
         } catch (Exception e) {
             log.error("Could not accept connection  on " + listenPort.getName() + ": " + e);
         }

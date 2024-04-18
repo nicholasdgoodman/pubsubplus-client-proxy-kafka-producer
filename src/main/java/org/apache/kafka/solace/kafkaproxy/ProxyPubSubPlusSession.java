@@ -13,20 +13,19 @@ import com.solacesystems.jcsmp.JCSMPFactory;
 import com.solacesystems.jcsmp.JCSMPProperties;
 import com.solacesystems.jcsmp.JCSMPSession;
 import com.solacesystems.jcsmp.JCSMPStreamingPublishCorrelatingEventHandler;
-import com.solacesystems.jcsmp.Topic;
 import com.solacesystems.jcsmp.XMLMessage.MessageUserPropertyConstants;
 import com.solacesystems.jcsmp.XMLMessageProducer;
+import com.solacesystems.common.util.DestinationType;
 import com.solacesystems.jcsmp.BytesMessage;
 import com.solacesystems.jcsmp.SDTMap;
 import com.solacesystems.jcsmp.DeliveryMode;
-
+import com.solacesystems.jcsmp.Destination;
 
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.HashSet;
-import java.util.Properties;
 import java.io.UnsupportedEncodingException;
 
 import org.slf4j.Logger;
@@ -40,28 +39,31 @@ class ProxyPubSubPlusSession {
     private final XMLMessageProducer publisher;
     private final String topicSeparatorReplace;
 
+    private final DestinationType destinationType;
+    private final boolean appendPartition;
+
     private long publishCount = 0;
     ScheduledExecutorService publishCountLogger;
 
-    public ProxyPubSubPlusSession(Properties baseServiceProps,
+    public ProxyPubSubPlusSession(ProxyConfig proxyConfig,
             ProxyChannel channel,
             byte[] username, byte[] password)
             throws UnsupportedEncodingException, InvalidPropertiesException, JCSMPException {
 		channels = new HashSet<ProxyChannel>();
 		addChannel(channel);
 		final JCSMPProperties properties = new JCSMPProperties();
-		properties.setProperty(JCSMPProperties.HOST, baseServiceProps.getProperty(JCSMPProperties.HOST));
-        if (baseServiceProps.containsKey(JCSMPProperties.VPN_NAME)) {
-		    properties.setProperty(JCSMPProperties.VPN_NAME, baseServiceProps.getProperty(JCSMPProperties.VPN_NAME));
-        }
+
+        properties.setProperty(JCSMPProperties.HOST, proxyConfig.getString(JCSMPProperties.HOST));
+        properties.setProperty(JCSMPProperties.VPN_NAME, proxyConfig.getString(JCSMPProperties.VPN_NAME));
 		properties.setProperty(JCSMPProperties.USERNAME, new String(username, "UTF-8"));
 		properties.setProperty(JCSMPProperties.PASSWORD, new String(password, "UTF-8"));
         properties.setProperty(JCSMPProperties.PUB_ACK_WINDOW_SIZE, 255);
-        if (baseServiceProps.containsKey(ProxyConfig.SEPARATOR_CONFIG)) {
-        	topicSeparatorReplace = '[' + baseServiceProps.getProperty(ProxyConfig.SEPARATOR_CONFIG) + ']';
-        } else {
-        	topicSeparatorReplace = "";
-        }
+
+        topicSeparatorReplace = proxyConfig.getString(ProxyConfig.SEPARATOR_CONFIG);
+        destinationType = proxyConfig.getString(ProxyConfig.DESTINATION_TYPE_CONFIG).equalsIgnoreCase("topic") ?
+            DestinationType.topic : DestinationType.queue;
+        appendPartition = proxyConfig.getBoolean(ProxyConfig.DESTINATION_INCLUDE_PARTITION_CONFIG);
+        
 		log.info("Creating new session to Solace event broker");
 		session =  JCSMPFactory.onlyInstance().createSession(properties);
 		
@@ -138,18 +140,29 @@ class ProxyPubSubPlusSession {
         }, 1000, 1000, TimeUnit.MILLISECONDS); 
     }
     
-    private String solaceConvertTopic(String topic) {
-    	if (topicSeparatorReplace.isEmpty()) {
-        	return topic;  // don't change anything
-    	}
-		topic = topic.replaceAll(topicSeparatorReplace, "/");  // replace all _ or . with /
-		topic = topic.replaceAll("//", "/_/");   // any empty levels replace with a _
-		topic = topic.replaceFirst("^/", "_/");  // no leading empty level
-		topic = topic.replaceFirst("/$", "/_");  // no trailing empty level
-		return topic;
+    private Destination createSolaceDestination(String kafkaTopic, int partitionId) {
+        String solaceDestinationName = kafkaTopic;
+
+    	if (!topicSeparatorReplace.isEmpty()) {
+            solaceDestinationName = solaceDestinationName.replaceAll(
+                String.format("[{0}]", topicSeparatorReplace), "/");  // replace all _ or . with /
+            solaceDestinationName = solaceDestinationName.replaceAll("//", "/_/");   // any empty levels replace with a _
+            solaceDestinationName = solaceDestinationName.replaceFirst("^/", "_/");  // no leading empty level
+            solaceDestinationName = solaceDestinationName.replaceFirst("/$", "/_");  // no trailing empty level
+        }
+
+        if (appendPartition) {
+            solaceDestinationName = String.join(destinationType == DestinationType.topic ? "/" : "-",
+                solaceDestinationName,
+                String.valueOf(partitionId));
+        }
+
+		return destinationType == DestinationType.topic ?
+            JCSMPFactory.onlyInstance().createTopic(solaceDestinationName) :
+            JCSMPFactory.onlyInstance().createQueue(solaceDestinationName);
     }
 
-    public void publish(String topic, byte[] payload, byte[] key, ProxyChannel.ProduceAckState produceAckState) {
+    public void publish(String topic, int partitionId, byte[] payload, byte[] key, ProxyChannel.ProduceAckState produceAckState) {
 		try {
 			BytesMessage msg = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
 			msg.setCorrelationKey(produceAckState);
@@ -160,8 +173,9 @@ class ProxyPubSubPlusSession {
 			    solaceMsgProperties.putString(MessageUserPropertyConstants.QUEUE_PARTITION_KEY, new String(key, "UTF-8"));
 			    msg.setProperties(solaceMsgProperties);
 			}
-			final Topic solaceTopic = JCSMPFactory.onlyInstance().createTopic(solaceConvertTopic(topic));
-			publisher.send(msg, solaceTopic);
+
+			final Destination destination = createSolaceDestination(topic, partitionId);
+			publisher.send(msg, destination);
             publishCount++;
 		} catch (UnsupportedEncodingException | JCSMPException e) {
 			log.info("Publish did not work: " + e);

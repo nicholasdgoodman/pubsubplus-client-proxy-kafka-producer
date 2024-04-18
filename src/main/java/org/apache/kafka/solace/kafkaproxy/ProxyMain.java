@@ -42,11 +42,13 @@ public class ProxyMain {
             log.warn("Could not load properties file: " + ex);
             return;
         }
+
+        ProxyConfig proxyConfig = new ProxyConfig(props);
         
-        ProxyPubSubPlusClient.getInstance().configure(props);
+        ProxyPubSubPlusClient.getInstance().configure(proxyConfig);
         
         try {
-            final ProxyReactor proxyReactor = new ProxyReactor(new ProxyConfig(props), clusterId);
+            final ProxyReactor proxyReactor = new ProxyReactor(proxyConfig, clusterId);
             proxyReactor.start();
             proxyReactor.join();
         } catch (Exception e) {

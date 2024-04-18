@@ -27,7 +27,7 @@ class ProxyPubSubPlusClient {
     private static final Logger log = LoggerFactory.getLogger(ProxyPubSubPlusClient.class);
     private static ProxyPubSubPlusClient client = new ProxyPubSubPlusClient();
     private static final ExecutorService executorService = Executors.newSingleThreadExecutor(); // TEMPORARY until async connect available
-    private Properties baseServiceProps;
+    private ProxyConfig proxyConfig;
     private Map<ByteArrayWrapper, ProxyPubSubPlusSession> map;
     
     private final class ByteArrayWrapper
@@ -67,8 +67,8 @@ class ProxyPubSubPlusClient {
     
     public static void close() { executorService.shutdownNow(); }        
     
-    public void configure(Properties serviceProps) {
-        baseServiceProps = serviceProps;
+    public void configure(ProxyConfig proxyConfig) {
+        this.proxyConfig = proxyConfig;
     }
     
     // This is inefficient but we do not have very many session entries
@@ -114,7 +114,7 @@ class ProxyPubSubPlusClient {
                 } else {
                     try {
                         session =  new ProxyPubSubPlusSession(
-                                            baseServiceProps, authResult.getProxyChannel(),
+                                            proxyConfig, authResult.getProxyChannel(),
                                             username, password);
                     } catch (Exception e) {
                         throw new SaslAuthenticationException("Authentication failed: could not establish session to Solace broker: " + e);
