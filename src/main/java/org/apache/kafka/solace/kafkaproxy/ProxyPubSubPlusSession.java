@@ -22,6 +22,7 @@ import com.solacesystems.jcsmp.DeliveryMode;
 import com.solacesystems.jcsmp.Destination;
 
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -38,6 +39,7 @@ class ProxyPubSubPlusSession {
     private final JCSMPSession session;
     private final XMLMessageProducer publisher;
     private final String topicSeparatorReplace;
+    private final ExecutorService publishService;
 
     private final DestinationType destinationType;
     private final boolean appendPartition;
@@ -81,7 +83,9 @@ class ProxyPubSubPlusSession {
 				// is immutable and failures should be very rare
 				new ProxyChannel.ProduceAckState(produceAckState, false).addToWorkQueue();
             }
-	    });    
+	    });
+        
+        publishService = Executors.newSingleThreadExecutor();
     }
 
     public void addChannel(ProxyChannel channel) {
@@ -163,24 +167,26 @@ class ProxyPubSubPlusSession {
     }
 
     public void publish(String topic, int partitionId, byte[] payload, byte[] key, ProxyChannel.ProduceAckState produceAckState) {
-		try {
-			BytesMessage msg = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
-			msg.setCorrelationKey(produceAckState);
-			msg.setDeliveryMode(DeliveryMode.PERSISTENT);
-			msg.writeAttachment(payload);
-			if (key != null) {
-			    SDTMap solaceMsgProperties = JCSMPFactory.onlyInstance().createMap();
-			    solaceMsgProperties.putString(MessageUserPropertyConstants.QUEUE_PARTITION_KEY, new String(key, "UTF-8"));
-			    msg.setProperties(solaceMsgProperties);
-			}
-
-			final Destination destination = createSolaceDestination(topic, partitionId);
-			publisher.send(msg, destination);
-            publishCount++;
-		} catch (UnsupportedEncodingException | JCSMPException e) {
-			log.info("Publish did not work: " + e);
-		    new ProxyChannel.ProduceAckState(produceAckState, false).addToWorkQueue();
-		}
+        publishService.submit(() -> {
+            try {
+                BytesMessage msg = JCSMPFactory.onlyInstance().createMessage(BytesMessage.class);
+                msg.setDeliveryMode(DeliveryMode.PERSISTENT);
+                msg.setCorrelationKey(produceAckState);
+                msg.writeAttachment(payload);
+                if (key != null) {
+                    SDTMap solaceMsgProperties = JCSMPFactory.onlyInstance().createMap();
+                    solaceMsgProperties.putString(MessageUserPropertyConstants.QUEUE_PARTITION_KEY, new String(key, "UTF-8"));
+                    msg.setProperties(solaceMsgProperties);
+                }
+    
+                final Destination destination = createSolaceDestination(topic, partitionId);
+                publisher.send(msg, destination);
+                publishCount++;
+            } catch (UnsupportedEncodingException | JCSMPException e) {
+                log.info("Publish did not work: " + e);
+                new ProxyChannel.ProduceAckState(produceAckState, false).addToWorkQueue();
+            }
+        });
     }
     
     public void close() {
